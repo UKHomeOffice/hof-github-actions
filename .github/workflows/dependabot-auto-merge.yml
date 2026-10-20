@@ -1,0 +1,95 @@
+name: Dependabot auto-merge
+
+on:
+  workflow_call:
+    secrets:
+      DEPENDABOT_APPROVER_APP_ID:
+        description: GitHub App ID used to approve and enable auto-merge.
+        required: true
+      DEPENDABOT_APPROVER_PRIVATE_KEY:
+        description: Private key for the Dependabot approver GitHub App.
+        required: true
+
+permissions: {}
+
+jobs:
+  auto-merge:
+    if: >-
+      github.event.pull_request.user.login == 'dependabot[bot]' &&
+      (startsWith(github.event.pull_request.head.ref, 'dependabot/') ||
+       startsWith(github.event.pull_request.head.ref, 'dependabot-') ||
+       startsWith(github.event.pull_request.head.ref, 'deps-'))
+    runs-on: ubuntu-latest
+    steps:
+      - name: Adapt short branch names for Dependabot metadata
+        id: metadata-event
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const fs = require('node:fs');
+            const path = require('node:path');
+            const event = JSON.parse(fs.readFileSync(process.env.GITHUB_EVENT_PATH, 'utf8'));
+            const branch = event.pull_request.head.ref;
+            if (!branch.startsWith('deps-')) {
+              core.setOutput('path', process.env.GITHUB_EVENT_PATH);
+              return;
+            }
+            // Short deps- branches represent npm updates at the repository root.
+            event.pull_request.head.ref = `dependabot/npm_and_yarn/${branch.slice(5)}`;
+            const directory = fs.mkdtempSync(path.join(process.env.RUNNER_TEMP, 'dependabot-metadata-'));
+            const eventPath = path.join(directory, 'event.json');
+            fs.writeFileSync(eventPath, JSON.stringify(event));
+            core.info(`Adapting metadata branch context: ${branch} -> ${event.pull_request.head.ref}`);
+            core.setOutput('path', eventPath);
+
+      - name: Download verified Dependabot metadata action
+        uses: actions/checkout@v5
+        with:
+          repository: dependabot/fetch-metadata
+          ref: 25dd0e34f4fe68f24cc83900b1fe3fe149efef98
+          path: .dependabot-fetch-metadata
+          persist-credentials: false
+
+      - name: Set up metadata action runtime
+        uses: actions/setup-node@v5
+        with:
+          node-version: '24'
+
+      - name: Read Dependabot metadata
+        id: metadata
+        shell: bash
+        env:
+          DEPENDABOT_EVENT_PATH: ${{ steps.metadata-event.outputs.path }}
+          INPUT_GITHUB-TOKEN: ${{ github.token }}
+          INPUT_SKIP-COMMIT-VERIFICATION: 'false'
+          INPUT_SKIP-VERIFICATION: 'false'
+        # The runner restores GITHUB_EVENT_PATH for each step; override it inside the process.
+        run: GITHUB_EVENT_PATH="$DEPENDABOT_EVENT_PATH" node .dependabot-fetch-metadata/dist/index.js
+
+      - name: Generate approver App token
+        id: app-token
+        if: >-
+          steps.metadata.outputs.maintainer-changes != 'true' &&
+           (steps.metadata.outputs.update-type == 'version-update:semver-patch' ||
+           steps.metadata.outputs.update-type == 'version-update:semver-minor')
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ secrets.DEPENDABOT_APPROVER_APP_ID }}
+          private-key: ${{ secrets.DEPENDABOT_APPROVER_PRIVATE_KEY }}
+
+      - name: Approve
+        if: steps.app-token.outcome == 'success'
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+        run: |
+          if [ "$(gh pr view "$PR_URL" --json reviewDecision -q .reviewDecision)" != "APPROVED" ]; then
+            gh pr review --approve "$PR_URL"
+          fi
+
+      - name: Enable auto-merge
+        if: steps.app-token.outcome == 'success'
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+        run: gh pr merge --auto --squash "$PR_URL"
