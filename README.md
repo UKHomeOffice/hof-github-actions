@@ -2,6 +2,15 @@
 
 This repo is for storing reusable Github actions and workflows for the Home Office Forms (HOF) services.
 
+## Contents
+
+- [Workflows](#workflows)
+  - [Dependabot Auto Merge](#dependabot-auto-merge)
+    - [Service prerequisites](#service-prerequisites)
+    - [Rollout and rollback](#rollout-and-rollback)
+  - [Sync hof-nodejs image in .drone.yml](#sync-hof-nodejs-image-in-droneyml)
+    - [Service prerequisites](#service-prerequisites-1)
+
 ## Workflows
 
 ### Dependabot Auto Merge
@@ -56,3 +65,58 @@ callers in other services.
 
 To roll back a service, restore its previous inline workflow or point its caller
 at a previously verified shared-workflow commit. No data migration is required.
+
+### Sync hof-nodejs image in .drone.yml
+
+Copies the pinned `hof-nodejs` image from a Dependabot pull request's `Dockerfile`
+to the `node_image_name` anchor in `.drone.yml`, and pushes the change to the pull
+request branch as a signed commit.
+
+Add the following caller workflow to a service's `.github/workflows/` directory:
+
+```yaml
+name: Sync hof-nodejs image in .drone.yml
+
+# pull_request_target is needed for access to Actions secrets on Dependabot PRs; PR code is only read, never executed.
+on:
+  pull_request_target:
+    types: [opened, reopened, synchronize]
+    paths:
+      - Dockerfile
+
+permissions: {}
+
+concurrency:
+  group: sync-drone-node-image-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  sync:
+    permissions:
+      contents: read
+    uses: UKHomeOffice/hof-github-actions/.github/workflows/sync-drone-node-image.yml@main
+    secrets:
+      app-id: ${{ secrets.DEPENDABOT_APPROVER_APP_ID }}
+      private-key: ${{ secrets.DEPENDABOT_APPROVER_PRIVATE_KEY }}
+```
+
+The [reusable workflow](.github/workflows/sync-drone-node-image.yml) runs only for
+`pull_request_target` events on pull requests opened and updated by
+`dependabot[bot]` from a branch in the same repository. It does not execute the
+pull request's code; it only reads `Dockerfile` and edits `.drone.yml`.
+
+#### Service prerequisites
+
+- `Dockerfile` must reference the image as
+  `quay.io/ukhomeofficedigital/hof-nodejs:<tag>@sha256:<digest>`.
+- `.drone.yml` must define the image on a line starting with
+  `node_image_name: &node_image_name `.
+- The calling job must grant `contents: read`, as reusable workflows cannot
+  exceed the caller's permissions.
+- Install the GitHub App on the service repository with contents write
+  permission, and make its ID and private key available to the caller as Actions
+  secrets.
+
+Once the App commits to a Dependabot branch, Dependabot no longer rebases that
+pull request automatically. Comment `@dependabot recreate` to regenerate it; the
+sync then runs again.
