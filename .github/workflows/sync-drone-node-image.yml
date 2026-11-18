@@ -2,6 +2,11 @@ name: Sync hof-nodejs image in .drone.yml and package.json
 
 on:
   workflow_call:
+    inputs:
+      image:
+        description: Image name without tag or digest, e.g. node or quay.io/ukhomeofficedigital/hof-nodejs
+        type: string
+        default: quay.io/ukhomeofficedigital/hof-nodejs
     secrets:
       app-id:
         required: true
@@ -28,16 +33,25 @@ jobs:
           ref: ${{ github.event.pull_request.head.sha }}
           persist-credentials: false
 
-      - name: Read hof-nodejs image from Dockerfile
+      - name: Read Node image from Dockerfile
         id: image
+        env:
+          IMAGE_NAME: ${{ inputs.image }}
         run: |
-          image=$(grep -m1 -oE 'quay\.io/ukhomeofficedigital/hof-nodejs:[^[:space:]]+' Dockerfile)
-          if ! echo "$image" | grep -qE '^quay\.io/ukhomeofficedigital/hof-nodejs:[0-9]+\.[0-9]+\.[0-9]+[A-Za-z0-9._-]*@sha256:[a-f0-9]{64}$'; then
-            echo "Unexpected hof-nodejs image reference in Dockerfile: '$image'"
+          if ! printf '%s' "$IMAGE_NAME" | grep -qE '^[a-z0-9]([a-z0-9._/:-]*[a-z0-9])?$'; then
+            echo "Invalid image input: '$IMAGE_NAME'"
+            exit 1
+          fi
+          name_re=$(printf '%s' "$IMAGE_NAME" | sed 's/\./\\./g')
+          # Leading boundary stops e.g. "node" matching inside "foo/node".
+          image=$(grep -oE "(^|[[:space:]=])${name_re}:[^[:space:]]+" Dockerfile | head -n1 | sed -E 's/^[[:space:]=]//' || true)
+          if ! printf '%s' "$image" | grep -qE "^${name_re}:[0-9]+\.[0-9]+\.[0-9]+[A-Za-z0-9._-]*@sha256:[a-f0-9]{64}$"; then
+            echo "Unexpected ${IMAGE_NAME} image reference in Dockerfile: '$image'"
             exit 1
           fi
           # e.g. hof-nodejs:24.22.2_3-alpine@sha256:... -> 24.22.2
-          version=$(echo "$image" | sed -E 's|^[^:]+:([0-9]+\.[0-9]+\.[0-9]+).*$|\1|')
+          tag=${image#"$IMAGE_NAME":}
+          version=$(printf '%s' "$tag" | grep -oE '^[0-9]+\.[0-9]+\.[0-9]+')
           echo "image=$image" >> "$GITHUB_OUTPUT"
           echo "version=$version" >> "$GITHUB_OUTPUT"
 
@@ -113,7 +127,7 @@ jobs:
                 input: {
                   branch: { repositoryNameWithOwner: $repo, branchName: $branch },
                   expectedHeadOid: $head,
-                  message: { headline: "deps: sync hof-nodejs image and node version" },
+                  message: { headline: "deps: sync node image and version" },
                   fileChanges: { additions: $additions }
                 }
               }

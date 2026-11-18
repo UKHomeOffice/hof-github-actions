@@ -68,8 +68,8 @@ at a previously verified shared-workflow commit. No data migration is required.
 
 ### Sync hof-nodejs image in .drone.yml and package.json
 
-Reads the pinned `hof-nodejs` image from a Dependabot pull request's `Dockerfile`
-and updates:
+Reads the pinned Node image (`quay.io/ukhomeofficedigital/hof-nodejs` by default)
+from a Dependabot pull request's `Dockerfile` and updates:
 
 - the `node_image_name` anchor in `.drone.yml`
 - the Node version used by e2e test steps in `.drone.yml` (e.g. `e2e_tests` and
@@ -109,6 +109,15 @@ jobs:
       private-key: ${{ secrets.DEPENDABOT_APPROVER_PRIVATE_KEY }}
 ```
 
+To use a different Node image, set the `image` input to the image name without
+its tag or digest:
+
+```yaml
+    uses: UKHomeOffice/hof-github-actions/.github/workflows/sync-drone-node-image.yml@main
+    with:
+      image: node
+```
+
 The [reusable workflow](.github/workflows/sync-drone-node-image.yml) runs only for
 `pull_request_target` events on pull requests opened and updated by
 `dependabot[bot]` from a branch in the same repository. It does not execute the
@@ -117,9 +126,8 @@ pull request's code; it only reads `Dockerfile` and edits `.drone.yml` and
 
 #### Service prerequisites
 
-- `Dockerfile` must reference the image as
-  `quay.io/ukhomeofficedigital/hof-nodejs:<tag>@sha256:<digest>`, where `<tag>`
-  starts with the Node version (`X.Y.Z`).
+- `Dockerfile` must reference the image as `<image>:<tag>@sha256:<digest>`,
+  where `<tag>` starts with the Node version (`X.Y.Z`).
 - `.drone.yml` must define the image on a line starting with
   `node_image_name: &node_image_name `.
 - e2e test steps in `.drone.yml` must set the Node version with a command of the
