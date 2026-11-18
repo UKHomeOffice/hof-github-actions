@@ -1,7 +1,12 @@
-name: Sync hof-nodejs image in .drone.yml
+name: Sync hof-nodejs image in .drone.yml and package.json
 
 on:
   workflow_call:
+    inputs:
+      image:
+        description: Image name without tag or digest, e.g. node or quay.io/ukhomeofficedigital/hof-nodejs
+        type: string
+        default: quay.io/ukhomeofficedigital/hof-nodejs
     secrets:
       app-id:
         required: true
@@ -28,24 +33,65 @@ jobs:
           ref: ${{ github.event.pull_request.head.sha }}
           persist-credentials: false
 
-      - name: Copy hof-nodejs image from Dockerfile to .drone.yml
+      - name: Read Node image from Dockerfile
+        id: image
+        env:
+          IMAGE_NAME: ${{ inputs.image }}
         run: |
-          image=$(grep -m1 -oE 'quay\.io/ukhomeofficedigital/hof-nodejs:[^[:space:]]+' Dockerfile)
-          if ! echo "$image" | grep -qE '^quay\.io/ukhomeofficedigital/hof-nodejs:[A-Za-z0-9._-]+@sha256:[a-f0-9]{64}$'; then
-            echo "Unexpected hof-nodejs image reference in Dockerfile: '$image'"
+          if ! printf '%s' "$IMAGE_NAME" | grep -qE '^[a-z0-9]([a-z0-9._/:-]*[a-z0-9])?$'; then
+            echo "Invalid image input: '$IMAGE_NAME'"
             exit 1
           fi
-          sed -i -E "s|^(node_image_name: &node_image_name ).*$|\1${image}|" .drone.yml
-          grep -qF "node_image_name: &node_image_name ${image}" .drone.yml
+          name_re=$(printf '%s' "$IMAGE_NAME" | sed 's/\./\\./g')
+          # Leading boundary stops e.g. "node" matching inside "foo/node".
+          image=$(grep -oE "(^|[[:space:]=])${name_re}:[^[:space:]]+" Dockerfile | head -n1 | sed -E 's/^[[:space:]=]//' || true)
+          if ! printf '%s' "$image" | grep -qE "^${name_re}:[0-9]+\.[0-9]+\.[0-9]+[A-Za-z0-9._-]*@sha256:[a-f0-9]{64}$"; then
+            echo "Unexpected ${IMAGE_NAME} image reference in Dockerfile: '$image'"
+            exit 1
+          fi
+          # e.g. hof-nodejs:24.22.2_3-alpine@sha256:... -> 24.22.2
+          tag=${image#"$IMAGE_NAME":}
+          version=$(printf '%s' "$tag" | grep -oE '^[0-9]+\.[0-9]+\.[0-9]+')
+          echo "image=$image" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Update .drone.yml
+        env:
+          IMAGE: ${{ steps.image.outputs.image }}
+          VERSION: ${{ steps.image.outputs.version }}
+        run: |
+          sed -i -E "s|^(node_image_name: &node_image_name ).*$|\1${IMAGE}|" .drone.yml
+          grep -qF "node_image_name: &node_image_name ${IMAGE}" .drone.yml
+          # Covers e2e steps (including commented-out ones) that install node via `n <version>`.
+          sed -i -E "s/^([[:space:]]*(#[[:space:]]*)?- n )[0-9]+\.[0-9]+\.[0-9]+[[:space:]]*$/\1${VERSION}/" .drone.yml
+
+      - name: Update package.json engines.node
+        env:
+          VERSION: ${{ steps.image.outputs.version }}
+        run: |
+          if [ ! -f package.json ] || ! jq -e '.engines.node' package.json > /dev/null; then
+            echo "No engines.node in package.json, skipping"
+            exit 0
+          fi
+          range=">=${VERSION} <$(( ${VERSION%%.*} + 1 )).0.0"
+          # Skip the jq rewrite when already current, so formatting isn't touched needlessly.
+          if jq -e --arg range "$range" '.engines.node == $range' package.json > /dev/null; then
+            exit 0
+          fi
+          tmp=$(mktemp)
+          jq --arg range "$range" '.engines.node = $range' package.json > "$tmp"
+          mv "$tmp" package.json
 
       - name: Check for changes
         id: changes
         run: |
-          if git diff --quiet -- .drone.yml; then
-            echo ".drone.yml already up to date"
+          files=$(git diff --name-only -- .drone.yml package.json | tr '\n' ' ')
+          if [ -z "$files" ]; then
+            echo "Files already up to date"
             echo "changed=false" >> "$GITHUB_OUTPUT"
           else
             echo "changed=true" >> "$GITHUB_OUTPUT"
+            echo "files=$files" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Generate GitHub App token
@@ -65,20 +111,24 @@ jobs:
           REPOSITORY: ${{ github.repository }}
           BRANCH: ${{ github.event.pull_request.head.ref }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          FILES: ${{ steps.changes.outputs.files }}
         run: |
+          additions=$(for f in $FILES; do
+            jq -n --arg path "$f" --arg contents "$(base64 -w0 "$f")" '{path: $path, contents: $contents}'
+          done | jq -s .)
           jq -n \
             --arg repo "$REPOSITORY" \
             --arg branch "$BRANCH" \
             --arg head "$HEAD_SHA" \
-            --arg contents "$(base64 -w0 .drone.yml)" \
+            --argjson additions "$additions" \
             '{
               query: "mutation($input: CreateCommitOnBranchInput!) { createCommitOnBranch(input: $input) { commit { url } } }",
               variables: {
                 input: {
                   branch: { repositoryNameWithOwner: $repo, branchName: $branch },
                   expectedHeadOid: $head,
-                  message: { headline: "deps: sync hof-nodejs image in .drone.yml" },
-                  fileChanges: { additions: [{ path: ".drone.yml", contents: $contents }] }
+                  message: { headline: "deps: sync node image and version" },
+                  fileChanges: { additions: $additions }
                 }
               }
             }' | gh api graphql --input -
